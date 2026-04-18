@@ -1,0 +1,10 @@
+DISCORD_DELIVERY_MODE=webhook
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your-webhook-id/your-webhook-token
+DISCORD_API_BASE=https://discord.com/api/v10
+DISCORD_BOT_TOKEN=
+DISCORD_DM_USER_ID=
+GITHUB_TOKEN=
+ADMIN_TOKEN=replace-with-a-random-token-before-using-run
+AI_GATEWAY_ID=discord_update_check
+AI_GATEWAY_SKIP_CACHE=false
+AI_GATEWAY_CACHE_TTL=

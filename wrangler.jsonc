@@ -1,0 +1,38 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "copilot-cli-discord-watcher",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-03-20",
+	"observability": {
+		"enabled": true
+	},
+  "kv_namespaces": [
+    {
+      "binding": "STATE",
+      "id": "5162818080cd4634bed1d8ed86743efb"
+    }
+  ],
+	"ai": {
+		"binding": "AI"
+	},
+	"triggers": {
+		"crons": [
+			"*/30 * * * *"
+		]
+	},
+	"vars": {
+    "REPO_OWNER": "github",
+    "REPO_NAME": "copilot-cli",
+    "AI_GATEWAY_ID": "discord_update_check",
+    "DISCORD_DELIVERY_MODE": "bot-dm",
+    "DISCORD_API_BASE": "https://discord.com/api/v10",
+		"WATCH_RELEASES": "true",
+		"WATCH_COMMITS": "false",
+		"MAX_RELEASES_PER_RUN": "3",
+		"MAX_COMMITS_PER_RUN": "5",
+		"INITIAL_SYNC_MODE": "skip",
+		"USE_WORKERS_AI": "true",
+		"WORKERS_AI_MODEL": "@cf/zai-org/glm-4.7-flash",
+		"DISCORD_USERNAME": "Copilot CLI Watcher"
+	}
+}
