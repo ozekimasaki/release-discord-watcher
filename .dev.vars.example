@@ -8,3 +8,8 @@ ADMIN_TOKEN=replace-with-a-random-token-before-using-run
 AI_GATEWAY_ID=discord_update_check
 AI_GATEWAY_SKIP_CACHE=false
 AI_GATEWAY_CACHE_TTL=
+WATCH_MODE=release
+# Minimal example:
+# MONITORED_REPOSITORIES=["github/copilot-cli","cloudflare/workers-sdk"]
+# Mixed-mode example:
+MONITORED_REPOSITORIES=["github/copilot-cli","openai/codex",{"repo":"cloudflare/workers-sdk","mode":"commit","branch":"main"}]

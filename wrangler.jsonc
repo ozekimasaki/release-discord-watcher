@@ -21,13 +21,11 @@
 		]
 	},
 	"vars": {
-    "REPO_OWNER": "github",
-    "REPO_NAME": "copilot-cli",
     "AI_GATEWAY_ID": "discord_update_check",
     "DISCORD_DELIVERY_MODE": "bot-dm",
     "DISCORD_API_BASE": "https://discord.com/api/v10",
-		"WATCH_RELEASES": "true",
-		"WATCH_COMMITS": "false",
+		"WATCH_MODE": "release",
+		"MONITORED_REPOSITORIES": "[\"github/copilot-cli\",\"openai/codex\",{\"repo\":\"cloudflare/workers-sdk\",\"mode\":\"commit\",\"branch\":\"main\"}]",
 		"MAX_RELEASES_PER_RUN": "3",
 		"MAX_COMMITS_PER_RUN": "5",
 		"INITIAL_SYNC_MODE": "skip",

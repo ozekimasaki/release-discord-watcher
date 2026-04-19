@@ -31,12 +31,9 @@ interface Env {
   INITIAL_SYNC_MODE?: string;
   MAX_COMMITS_PER_RUN?: string;
   MAX_RELEASES_PER_RUN?: string;
-  REPO_BRANCH?: string;
-  REPO_NAME?: string;
-  REPO_OWNER?: string;
+  MONITORED_REPOSITORIES?: string;
   USE_WORKERS_AI?: string;
-  WATCH_COMMITS?: string;
-  WATCH_RELEASES?: string;
+  WATCH_MODE?: string;
   WORKERS_AI_MODEL?: string;
 }
 
@@ -44,11 +41,13 @@ type DiscordDeliveryMode = "webhook" | "bot-dm";
 type InitialSyncMode = "skip" | "notify";
 type MonitorTopic = "release" | "commit";
 type TriggerSource = "cron" | "manual";
+type WatchMode = "release" | "commit" | "both";
 
-interface BaseAppConfig {
+interface BaseGlobalAppConfig {
   aiGatewayCacheTtl?: number;
   aiGatewayId?: string;
   aiGatewaySkipCache: boolean;
+  defaultWatchMode: WatchMode;
   discordApiBase: string;
   discordAvatarUrl?: string;
   discordDeliveryMode: DiscordDeliveryMode;
@@ -58,14 +57,31 @@ interface BaseAppConfig {
   initialSyncMode: InitialSyncMode;
   maxCommitsPerRun: number;
   maxReleasesPerRun: number;
-  repoBranch?: string;
-  repoName: string;
-  repoOwner: string;
   useWorkersAi: boolean;
-  watchCommits: boolean;
-  watchReleases: boolean;
   workersAiModel: string;
 }
+
+interface RepositoryWatchConfig {
+  branch?: string;
+  repoName: string;
+  repoOwner: string;
+  watchMode: WatchMode;
+}
+
+interface BaseAppConfig extends BaseGlobalAppConfig, RepositoryWatchConfig {}
+
+interface WebhookGlobalAppConfig extends BaseGlobalAppConfig {
+  discordDeliveryMode: "webhook";
+  discordWebhookUrl: string;
+}
+
+interface BotDmGlobalAppConfig extends BaseGlobalAppConfig {
+  discordBotToken: string;
+  discordDeliveryMode: "bot-dm";
+  discordDmUserId: string;
+}
+
+type GlobalAppConfig = WebhookGlobalAppConfig | BotDmGlobalAppConfig;
 
 interface WebhookAppConfig extends BaseAppConfig {
   discordDeliveryMode: "webhook";
@@ -80,11 +96,19 @@ interface BotDmAppConfig extends BaseAppConfig {
 
 type AppConfig = WebhookAppConfig | BotDmAppConfig;
 
+interface LoadedConfig {
+  globalConfig: GlobalAppConfig;
+  repositories: RepositoryWatchConfig[];
+}
+
 interface MonitorResult {
+  branch?: string;
   detail: string;
   itemCount?: number;
+  mode: WatchMode;
+  repo: string;
   sent: boolean;
-  status: "initialized" | "no_data" | "notified" | "unchanged";
+  status: "error" | "initialized" | "no_data" | "notified" | "unchanged";
   topic: MonitorTopic;
 }
 
@@ -198,18 +222,22 @@ export default {
 
 async function handleHttpRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const config = loadConfig(env);
+  const { globalConfig, repositories } = loadConfig(env);
 
   if (request.method === "GET" && url.pathname === "/") {
     return jsonResponse({
       ok: true,
-      repo: `${config.repoOwner}/${config.repoName}`,
-      discordDeliveryMode: config.discordDeliveryMode,
-      watchReleases: config.watchReleases,
-      watchCommits: config.watchCommits,
-      repoBranch: config.repoBranch ?? "auto-detect",
-      useWorkersAi: config.useWorkersAi,
-      initialSyncMode: config.initialSyncMode,
+      repositories: repositories.map((repository) => ({
+        repo: formatRepositoryName(repository),
+        mode: repository.watchMode,
+        branch: getRepositoryBranchLabel(repository),
+      })),
+      discordDeliveryMode: globalConfig.discordDeliveryMode,
+      defaultWatchMode: globalConfig.defaultWatchMode,
+      useWorkersAi: globalConfig.useWorkersAi,
+      initialSyncMode: globalConfig.initialSyncMode,
+      maxReleasesPerRun: globalConfig.maxReleasesPerRun,
+      maxCommitsPerRun: globalConfig.maxCommitsPerRun,
     });
   }
 
@@ -239,36 +267,102 @@ function authorizeManualTrigger(request: Request, env: Env): void {
 }
 
 async function runMonitor(env: Env, triggerSource: TriggerSource): Promise<MonitorResult[]> {
-  const config = loadConfig(env);
-  const repository = config.watchCommits && !config.repoBranch ? await fetchRepository(env, config) : undefined;
-  const branch = config.watchCommits ? config.repoBranch ?? repository?.default_branch : undefined;
+  const { globalConfig, repositories } = loadConfig(env);
+  const results = (
+    await Promise.all(repositories.map((repository) => runRepositoryMonitor(env, globalConfig, repository)))
+  ).flat();
 
-  if (config.watchCommits && !branch) {
-    throw new Error("Could not determine the branch to watch. Set REPO_BRANCH explicitly.");
-  }
-
-  const tasks: Array<Promise<MonitorResult>> = [];
-
-  if (config.watchReleases) {
-    tasks.push(processReleaseUpdates(env, config));
-  }
-
-  if (config.watchCommits && branch) {
-    tasks.push(processCommitUpdates(env, config, branch));
-  }
-
-  const results = await Promise.all(tasks);
   console.log(
     JSON.stringify({
       triggerSource,
-      repo: `${config.repoOwner}/${config.repoName}`,
+      repositoryCount: repositories.length,
       results,
     }),
   );
   return results;
 }
 
+async function runRepositoryMonitor(
+  env: Env,
+  globalConfig: GlobalAppConfig,
+  repositoryConfig: RepositoryWatchConfig,
+): Promise<MonitorResult[]> {
+  const config = buildRepositoryAppConfig(globalConfig, repositoryConfig);
+  const tasks: Array<Promise<MonitorResult>> = [];
+
+  if (shouldWatchReleases(config.watchMode)) {
+    tasks.push(settleMonitorTask(processReleaseUpdates(env, config), config, "release"));
+  }
+
+  if (shouldWatchCommits(config.watchMode)) {
+    const commitTask = resolveWatchedBranch(env, config).then((branch) => processCommitUpdates(env, config, branch));
+    tasks.push(settleMonitorTask(commitTask, config, "commit"));
+  }
+
+  return Promise.all(tasks);
+}
+
+async function settleMonitorTask(
+  task: Promise<MonitorResult>,
+  config: AppConfig,
+  topic: MonitorTopic,
+): Promise<MonitorResult> {
+  try {
+    return await task;
+  } catch (error) {
+    console.error("Monitor task failed", {
+      repo: formatRepositoryName(config),
+      topic,
+      error: getErrorMessage(error),
+    });
+
+    return {
+      repo: formatRepositoryName(config),
+      mode: config.watchMode,
+      branch: topic === "commit" ? config.branch : undefined,
+      topic,
+      sent: false,
+      status: "error",
+      detail: `Failed to process ${topic} updates: ${getErrorMessage(error)}`,
+    };
+  }
+}
+
+async function resolveWatchedBranch(env: Env, config: AppConfig): Promise<string> {
+  if (config.branch) {
+    return config.branch;
+  }
+
+  const repository = await fetchRepository(env, config);
+  const branch = repository.default_branch?.trim();
+  if (!branch) {
+    throw new Error(`Could not determine the branch to watch for ${formatRepositoryName(config)}.`);
+  }
+
+  return branch;
+}
+
+function buildRepositoryAppConfig(globalConfig: GlobalAppConfig, repositoryConfig: RepositoryWatchConfig): AppConfig {
+  if (globalConfig.discordDeliveryMode === "webhook") {
+    return {
+      ...globalConfig,
+      ...repositoryConfig,
+      discordDeliveryMode: "webhook",
+      discordWebhookUrl: globalConfig.discordWebhookUrl,
+    };
+  }
+
+  return {
+    ...globalConfig,
+    ...repositoryConfig,
+    discordDeliveryMode: "bot-dm",
+    discordBotToken: globalConfig.discordBotToken,
+    discordDmUserId: globalConfig.discordDmUserId,
+  };
+}
+
 async function processReleaseUpdates(env: Env, config: AppConfig): Promise<MonitorResult> {
+  const repo = formatRepositoryName(config);
   const releases = await fetchGitHubJson<GitHubRelease[]>(
     env,
     config,
@@ -278,6 +372,8 @@ async function processReleaseUpdates(env: Env, config: AppConfig): Promise<Monit
 
   if (releases.length === 0) {
     return {
+      repo,
+      mode: config.watchMode,
       topic: "release",
       sent: false,
       status: "no_data",
@@ -295,6 +391,8 @@ async function processReleaseUpdates(env: Env, config: AppConfig): Promise<Monit
     if (config.initialSyncMode === "notify") {
       await sendReleaseNotifications(env, config, releases.slice(0, 1));
       return {
+        repo,
+        mode: config.watchMode,
         topic: "release",
         sent: true,
         status: "notified",
@@ -304,6 +402,8 @@ async function processReleaseUpdates(env: Env, config: AppConfig): Promise<Monit
     }
 
     return {
+      repo,
+      mode: config.watchMode,
       topic: "release",
       sent: false,
       status: "initialized",
@@ -314,6 +414,8 @@ async function processReleaseUpdates(env: Env, config: AppConfig): Promise<Monit
   const newReleases = collectNewItems(releases, (release) => String(release.id), previousReleaseId);
   if (newReleases.length === 0) {
     return {
+      repo,
+      mode: config.watchMode,
       topic: "release",
       sent: false,
       status: "unchanged",
@@ -325,6 +427,8 @@ async function processReleaseUpdates(env: Env, config: AppConfig): Promise<Monit
   await env.STATE.put(stateKey, newestReleaseId);
 
   return {
+    repo,
+    mode: config.watchMode,
     topic: "release",
     sent: true,
     status: "notified",
@@ -334,6 +438,7 @@ async function processReleaseUpdates(env: Env, config: AppConfig): Promise<Monit
 }
 
 async function processCommitUpdates(env: Env, config: AppConfig, branch: string): Promise<MonitorResult> {
+  const repo = formatRepositoryName(config);
   const commits = await fetchGitHubJson<GitHubCommit[]>(
     env,
     config,
@@ -343,6 +448,9 @@ async function processCommitUpdates(env: Env, config: AppConfig, branch: string)
 
   if (commits.length === 0) {
     return {
+      repo,
+      mode: config.watchMode,
+      branch,
       topic: "commit",
       sent: false,
       status: "no_data",
@@ -361,6 +469,9 @@ async function processCommitUpdates(env: Env, config: AppConfig, branch: string)
       const initialCommits = [...commits].reverse();
       await sendCommitNotification(env, config, branch, initialCommits, undefined);
       return {
+        repo,
+        mode: config.watchMode,
+        branch,
         topic: "commit",
         sent: true,
         status: "notified",
@@ -370,6 +481,9 @@ async function processCommitUpdates(env: Env, config: AppConfig, branch: string)
     }
 
     return {
+      repo,
+      mode: config.watchMode,
+      branch,
       topic: "commit",
       sent: false,
       status: "initialized",
@@ -380,6 +494,9 @@ async function processCommitUpdates(env: Env, config: AppConfig, branch: string)
   const newCommits = collectNewItems(commits, (commit) => commit.sha, previousCommitSha);
   if (newCommits.length === 0) {
     return {
+      repo,
+      mode: config.watchMode,
+      branch,
       topic: "commit",
       sent: false,
       status: "unchanged",
@@ -392,6 +509,9 @@ async function processCommitUpdates(env: Env, config: AppConfig, branch: string)
   await env.STATE.put(stateKey, newestCommitSha);
 
   return {
+    repo,
+    mode: config.watchMode,
+    branch,
     topic: "commit",
     sent: true,
     status: "notified",
@@ -654,17 +774,17 @@ function buildCommitFallback(branch: string, commits: GitHubCommit[]): Localized
   };
 }
 
-function loadConfig(env: Env): AppConfig {
-  const repoOwner = requireEnv(env.REPO_OWNER, "REPO_OWNER");
-  const repoName = requireEnv(env.REPO_NAME, "REPO_NAME");
+function loadConfig(env: Env): LoadedConfig {
+  const globalConfig = loadGlobalConfig(env);
+  return {
+    globalConfig,
+    repositories: loadRepositoryConfigs(env, globalConfig.defaultWatchMode),
+  };
+}
+
+function loadGlobalConfig(env: Env): GlobalAppConfig {
   const discordDeliveryMode = parseDiscordDeliveryMode(env.DISCORD_DELIVERY_MODE);
-  const watchReleases = parseBoolean(env.WATCH_RELEASES, true);
-  const watchCommits = parseBoolean(env.WATCH_COMMITS, true);
-
-  if (!watchReleases && !watchCommits) {
-    throw new Error("At least one of WATCH_RELEASES or WATCH_COMMITS must be true.");
-  }
-
+  const defaultWatchMode = parseWatchMode(env.WATCH_MODE, "release", "WATCH_MODE");
   const initialSyncMode = parseInitialSyncMode(env.INITIAL_SYNC_MODE);
   const useWorkersAi = parseBoolean(env.USE_WORKERS_AI, true);
   const aiGatewayId = env.AI_GATEWAY_ID?.trim() || undefined;
@@ -674,19 +794,15 @@ function loadConfig(env: Env): AppConfig {
     throw new Error("USE_WORKERS_AI is true, but the AI binding is missing.");
   }
 
-  const baseConfig: BaseAppConfig = {
+  const baseConfig: BaseGlobalAppConfig = {
     aiGatewayId,
     aiGatewaySkipCache,
     aiGatewayCacheTtl: parseOptionalPositiveInteger(env.AI_GATEWAY_CACHE_TTL),
-    repoOwner,
-    repoName,
-    repoBranch: env.REPO_BRANCH?.trim() || undefined,
+    defaultWatchMode,
     discordApiBase: env.DISCORD_API_BASE?.trim() || DEFAULT_DISCORD_API_BASE,
     discordDeliveryMode,
     githubApiBase: env.GITHUB_API_BASE?.trim() || DEFAULT_GITHUB_API_BASE,
     githubToken: env.GITHUB_TOKEN?.trim() || undefined,
-    watchReleases,
-    watchCommits,
     maxReleasesPerRun: parsePositiveInteger(env.MAX_RELEASES_PER_RUN, 3),
     maxCommitsPerRun: parsePositiveInteger(env.MAX_COMMITS_PER_RUN, 5),
     initialSyncMode,
@@ -709,6 +825,86 @@ function loadConfig(env: Env): AppConfig {
     discordDeliveryMode: "bot-dm",
     discordBotToken: requireEnv(env.DISCORD_BOT_TOKEN, "DISCORD_BOT_TOKEN"),
     discordDmUserId: requireEnv(env.DISCORD_DM_USER_ID, "DISCORD_DM_USER_ID"),
+  };
+}
+
+function loadRepositoryConfigs(env: Env, defaultWatchMode: WatchMode): RepositoryWatchConfig[] {
+  const rawRepositories = requireEnv(env.MONITORED_REPOSITORIES, "MONITORED_REPOSITORIES");
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(rawRepositories);
+  } catch (error) {
+    throw new Error(`MONITORED_REPOSITORIES must be valid JSON. ${getErrorMessage(error)}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("MONITORED_REPOSITORIES must be a JSON array.");
+  }
+
+  if (parsed.length === 0) {
+    throw new Error("MONITORED_REPOSITORIES must include at least one repository.");
+  }
+
+  const repositories = parsed.map((entry, index) => normalizeRepositoryConfig(entry, index, defaultWatchMode));
+  validateUniqueRepositories(repositories);
+  return repositories;
+}
+
+function normalizeRepositoryConfig(
+  entry: unknown,
+  index: number,
+  defaultWatchMode: WatchMode,
+): RepositoryWatchConfig {
+  const label = `MONITORED_REPOSITORIES[${index}]`;
+
+  if (typeof entry === "string") {
+    return {
+      ...parseRepositoryReference(entry, label),
+      watchMode: defaultWatchMode,
+    };
+  }
+
+  if (!isRecord(entry)) {
+    throw new Error(`${label} must be a string or object.`);
+  }
+
+  const repo = readRequiredStringProperty(entry, "repo", `${label}.repo`);
+  const mode = parseWatchMode(readOptionalStringProperty(entry, "mode", `${label}.mode`), defaultWatchMode, `${label}.mode`);
+  const branch = readOptionalStringProperty(entry, "branch", `${label}.branch`);
+  if (branch && !shouldWatchCommits(mode)) {
+    throw new Error(`${label}.branch can only be set when mode is "commit" or "both".`);
+  }
+
+  return {
+    ...parseRepositoryReference(repo, `${label}.repo`),
+    watchMode: mode,
+    branch,
+  };
+}
+
+function validateUniqueRepositories(repositories: RepositoryWatchConfig[]): void {
+  const seen = new Set<string>();
+
+  for (const repository of repositories) {
+    const repo = formatRepositoryName(repository);
+    if (seen.has(repo)) {
+      throw new Error(`MONITORED_REPOSITORIES contains duplicate entries for ${repo}. Use mode "both" for one repo.`);
+    }
+    seen.add(repo);
+  }
+}
+
+function parseRepositoryReference(value: string, name: string): Pick<RepositoryWatchConfig, "repoOwner" | "repoName"> {
+  const trimmed = value.trim();
+  const parts = trimmed.split("/");
+  if (parts.length !== 2 || parts.some((part) => part.trim().length === 0)) {
+    throw new Error(`${name} must use the "owner/name" format.`);
+  }
+
+  return {
+    repoOwner: parts[0].trim(),
+    repoName: parts[1].trim(),
   };
 }
 
@@ -1018,6 +1214,19 @@ function parseInitialSyncMode(rawValue: string | undefined): InitialSyncMode {
   throw new Error(`INITIAL_SYNC_MODE must be "skip" or "notify", received: ${rawValue}`);
 }
 
+function parseWatchMode(rawValue: string | undefined, fallback: WatchMode, name: string): WatchMode {
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (normalized === "release" || normalized === "commit" || normalized === "both") {
+    return normalized;
+  }
+
+  throw new Error(`${name} must be "release", "commit", or "both", received: ${rawValue}`);
+}
+
 function parseDiscordDeliveryMode(rawValue: string | undefined): DiscordDeliveryMode {
   if (!rawValue) {
     return "webhook";
@@ -1037,6 +1246,57 @@ function requireEnv(value: string | undefined, name: string): string {
     throw new Error(`${name} is required.`);
   }
   return trimmed;
+}
+
+function readRequiredStringProperty(record: Record<string, unknown>, key: string, name: string): string {
+  if (!(key in record)) {
+    throw new Error(`${name} is required.`);
+  }
+
+  const value = readOptionalStringProperty(record, key, name);
+  if (!value) {
+    throw new Error(`${name} is required.`);
+  }
+
+  return value;
+}
+
+function readOptionalStringProperty(record: Record<string, unknown>, key: string, name: string): string | undefined {
+  if (!(key in record) || record[key] === undefined || record[key] === null) {
+    return undefined;
+  }
+
+  const value = record[key];
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a string.`);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`${name} must not be empty.`);
+  }
+
+  return trimmed;
+}
+
+function shouldWatchReleases(mode: WatchMode): boolean {
+  return mode === "release" || mode === "both";
+}
+
+function shouldWatchCommits(mode: WatchMode): boolean {
+  return mode === "commit" || mode === "both";
+}
+
+function formatRepositoryName(repository: Pick<RepositoryWatchConfig, "repoOwner" | "repoName">): string {
+  return `${repository.repoOwner}/${repository.repoName}`;
+}
+
+function getRepositoryBranchLabel(repository: Pick<RepositoryWatchConfig, "watchMode" | "branch">): string {
+  if (!shouldWatchCommits(repository.watchMode)) {
+    return "n/a";
+  }
+
+  return repository.branch ?? "auto-detect";
 }
 
 function extractHighlights(markdown: string): string[] {

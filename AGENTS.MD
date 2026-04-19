@@ -3,7 +3,7 @@
 ## 概要
 
 このフォルダは **Cloudflare Workers 上で動く GitHub 更新監視ツール** です。  
-対象リポジトリの **Release / Commit** を定期監視し、必要に応じて **Workers AI で日本語化・要約** して **Discord** に通知します。
+対象リポジトリ群の **Release / Commit** を定期監視し、必要に応じて **Workers AI で日本語化・要約** して **Discord** に通知します。
 
 実装はほぼ `src/index.ts` の単一ファイルに集約されており、**小規模・単機能な Worker** として整理されています。
 
@@ -104,9 +104,8 @@ copilot_update/
 
 | 変数 | 意味 |
 | --- | --- |
-| `REPO_OWNER` / `REPO_NAME` | 監視対象の GitHub リポジトリ |
-| `REPO_BRANCH` | Commit 監視対象ブランチ。未指定時は default branch 自動取得 |
-| `WATCH_RELEASES` / `WATCH_COMMITS` | 監視対象の ON/OFF |
+| `WATCH_MODE` | 既定の監視モード。`release` / `commit` / `both` |
+| `MONITORED_REPOSITORIES` | 監視対象 repo 一覧。`"owner/name"` の短縮形、または `{ "repo": "owner/name", "mode": "...", "branch": "..." }` の詳細形を JSON 配列で渡す |
 | `MAX_RELEASES_PER_RUN` / `MAX_COMMITS_PER_RUN` | 1 回の取得上限 |
 | `INITIAL_SYNC_MODE` | 初回同期の通知方針 |
 | `USE_WORKERS_AI` | AI 要約・翻訳を使うか |
@@ -116,6 +115,21 @@ copilot_update/
 | `AI_GATEWAY_CACHE_TTL` | AI Gateway のキャッシュ TTL |
 | `ADMIN_TOKEN` | `POST /run` の認証トークン |
 | `GITHUB_TOKEN` | GitHub API 制限回避や private repo 用 |
+
+`MONITORED_REPOSITORIES` の例:
+
+```json
+[
+  "github/copilot-cli",
+  { "repo": "cloudflare/workers-sdk", "mode": "commit", "branch": "main" },
+  { "repo": "oven-sh/bun", "mode": "both" }
+]
+```
+
+- `release`: Release だけ監視
+- `commit`: Commit だけ監視
+- `both`: Release と Commit の両方を監視
+- `branch` は `commit` / `both` のときだけ有効。未指定時は default branch を自動取得
 
 ## 開発コマンド
 
