@@ -46,22 +46,40 @@ The main settings are defined through Worker environment variables.
 
 ### Core settings
 
-| Variable | Description |
-| --- | --- |
-| `WATCH_MODE` | Default monitoring mode for repositories that do not override it. `release`, `commit`, or `both` |
-| `MONITORED_REPOSITORIES` | JSON array of repositories to watch |
-| `MAX_RELEASES_PER_RUN` | Max number of releases fetched per run |
-| `MAX_COMMITS_PER_RUN` | Max number of commits fetched per run |
-| `INITIAL_SYNC_MODE` | `skip` or `notify` |
-| `USE_WORKERS_AI` | Enables AI-based translation and summarization |
-| `WORKERS_AI_MODEL` | Workers AI model name |
-| `GITHUB_TOKEN` | Optional, recommended to avoid stricter rate limits |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `WATCH_MODE` | Default monitoring mode for repositories that do not override it. `release`, `commit`, or `both` | `release` |
+| `MONITORED_REPOSITORIES` | JSON array of repositories to watch (required) | — |
+| `MAX_RELEASES_PER_RUN` | Max number of releases fetched per run | `3` |
+| `MAX_COMMITS_PER_RUN` | Max number of commits fetched per run | `5` |
+| `INITIAL_SYNC_MODE` | `skip` or `notify` | `skip` |
+| `USE_WORKERS_AI` | Enables AI-based translation and summarization | `true` |
+| `WORKERS_AI_MODEL` | Workers AI model name | `@cf/meta/llama-3-8b-instruct` |
+| `GITHUB_TOKEN` | Optional, recommended to avoid stricter rate limits | — |
+| `ADMIN_TOKEN` | Bearer token required to authorize `POST /run` | — |
+
+When `USE_WORKERS_AI` is `true`, the `AI` binding must be configured (see `wrangler.jsonc`); otherwise the Worker fails to start.
+
+### Workers AI Gateway (optional)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `AI_GATEWAY_ID` | Routes Workers AI requests through a Cloudflare AI Gateway when set | — |
+| `AI_GATEWAY_SKIP_CACHE` | Skip the AI Gateway cache | `false` |
+| `AI_GATEWAY_CACHE_TTL` | AI Gateway cache TTL in seconds (used only when caching is not skipped) | — |
+
+### Advanced overrides (optional)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `GITHUB_API_BASE` | Override the GitHub API base URL | `https://api.github.com` |
+| `DISCORD_API_BASE` | Override the Discord API base URL (bot DM delivery) | `https://discord.com/api/v10` |
 
 ### Discord delivery
 
 | Variable | Description |
 | --- | --- |
-| `DISCORD_DELIVERY_MODE` | `webhook` or `bot-dm` |
+| `DISCORD_DELIVERY_MODE` | `webhook` or `bot-dm` (defaults to `webhook`) |
 | `DISCORD_WEBHOOK_URL` | Required for webhook delivery |
 | `DISCORD_BOT_TOKEN` | Required for bot DM delivery |
 | `DISCORD_DM_USER_ID` | Required for bot DM delivery |
@@ -93,6 +111,8 @@ The main settings are defined through Worker environment variables.
 - `mode` can be `release`, `commit`, or `both`
 - `branch` is only valid for `commit` or `both`
 - If `mode` is omitted, the repository uses `WATCH_MODE`
+- If `branch` is omitted for a watched repository, the default branch is auto-detected via the GitHub API
+- Duplicate `owner/name` entries are rejected; use `mode: "both"` to watch releases and commits for one repository
 
 ## Example configuration
 
@@ -115,11 +135,11 @@ WORKERS_AI_MODEL=@cf/zai-org/glm-4.7-flash
 
 ```bash
 npm install
-npm run check
-npm run dev
+npm run check   # runs the TypeScript type check (tsc --noEmit)
+npm run dev     # starts the Worker locally with wrangler dev
 ```
 
-Create a local `.dev.vars` file based on `.dev.vars.example`.
+Create a local `.dev.vars` file based on `.dev.vars.example`. `.dev.vars` is git-ignored and should never be committed.
 
 ## Deploy
 
@@ -141,3 +161,8 @@ npm run deploy
 - Commit notifications can fall back to commit list summaries if AI fails
 - The implementation is intentionally small and mostly centered in `src/index.ts`
 - `.dev.vars` should never be committed
+- The deployed Worker name is `copilot-cli-discord-watcher` (see `wrangler.jsonc`)
+
+## License
+
+No license file is currently included in this repository, so all rights are reserved by default. Add a `LICENSE` file if you intend to make the project reusable under specific terms.
