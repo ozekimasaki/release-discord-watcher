@@ -1,4 +1,4 @@
-# AGENTS.MD
+# AGENTS.md
 
 ## 概要
 
@@ -10,7 +10,7 @@
 ## ルート構成
 
 ```text
-copilot_update/
+release-discord-watcher/
 |- src/
 |  `- index.ts           # Worker 本体。HTTP API / cron / GitHub取得 / Discord通知 / AI整形を集約
 |- package.json          # npm scripts と依存関係
@@ -18,12 +18,14 @@ copilot_update/
 |- tsconfig.json         # TypeScript 設定
 |- wrangler.jsonc        # Cloudflare Workers 設定、KV/AI binding、cron、vars
 |- .dev.vars.example     # ローカル開発用の環境変数サンプル
-|- .dev.vars             # ローカル実値（秘匿、コミット対象外）
-|- .gitignore            # node_modules, .wrangler, .dev.vars などを除外
-|- .wrangler/            # Wrangler のローカル生成物
-|- node_modules/         # 依存パッケージ
-`- AGENTS.MD             # このドキュメント
+|- .dev.vars             # ローカル実値（秘匿、コミット対象外。存在する場合のみ）
+|- .gitignore            # node_modules, .wrangler, .dev.vars, dist を除外
+|- README.md            # 英語版 README
+|- README.ja.md         # 日本語版 README
+`- AGENTS.md            # このドキュメント
 ```
+
+`.wrangler/` と `node_modules/` は `npm install` / `wrangler` 実行時に生成されるため、リポジトリには含まれません。
 
 ## 主要ファイルの役割
 
@@ -31,7 +33,7 @@ copilot_update/
 | --- | --- |
 | `src/index.ts` | アプリケーション本体。設定読込、HTTP エンドポイント、cron 実行、GitHub API、Discord 通知、Workers AI 整形、KV state 管理を担当 |
 | `wrangler.jsonc` | Worker 名、エントリーポイント、`compatibility_date`、KV namespace `STATE`、AI binding `AI`、cron、デフォルト変数を定義 |
-| `package.json` | `npm run check`、`npm run dev`、`npm run deploy` を提供 |
+| `package.json` | `npm run check` / `npm run typecheck` / `npm run dev` / `npm run deploy` を提供。パッケージ名・Worker 名は `copilot-cli-discord-watcher` |
 | `.dev.vars.example` | ローカルで必要なシークレットや通知方式の例 |
 | `tsconfig.json` | Workers 向けに `ES2022` + `WebWorker` + strict mode を有効化 |
 
@@ -131,13 +133,37 @@ copilot_update/
 - `both`: Release と Commit の両方を監視
 - `branch` は `commit` / `both` のときだけ有効。未指定時は default branch を自動取得
 
-## 開発コマンド
+## セットアップ
 
 ```bash
-npm run check   # TypeScript 型チェック
-npm run dev     # Wrangler dev
-npm run deploy  # Cloudflare Workers へデプロイ
+npm install
 ```
+
+- Node.js と npm が必要です。
+- ローカル実行には `.dev.vars.example` を元に `.dev.vars` を作成します（秘匿情報のためコミット禁止）。
+- `wrangler` は devDependency として入るため、追加のグローバルインストールは不要です。
+
+## 開発コマンド
+
+実在する npm script は以下のみです。
+
+```bash
+npm run check     # = npm run typecheck
+npm run typecheck # TypeScript 型チェック (tsc --noEmit)
+npm run dev       # Wrangler dev（ローカル実行）
+npm run deploy    # Cloudflare Workers へデプロイ
+```
+
+- **型チェック / lint 相当**: `npm run typecheck`（`npm run check` も同じ）。専用の lint ツール（ESLint 等）や test ランナー、build スクリプトは定義されていません。
+- テストコードは現状存在しないため、変更後は必ず `npm run typecheck` を通してください。
+
+## コーディング規約
+
+- **言語**: TypeScript（`tsconfig.json` で `strict: true`、`target: ES2022`、`module: ESNext`、`moduleResolution: Bundler`）。`@cloudflare/workers-types` を型として使用。
+- **モジュール**: ESM（`package.json` の `"type": "module"`）。
+- **スタイル**: 2 スペースインデント、セミコロンあり、ダブルクォート。既存コードの並び（型定義 → エントリポイント → ハンドラ → ユーティリティ）とアルファベット順のフィールド並びに倣う。
+- **エラー処理**: HTTP エラーは `HttpError` クラス、その他は `getErrorMessage` で文字列化。ユーザー向け文言は日本語、内部ログ/例外メッセージは英語という既存方針に合わせる。
+- **環境変数**: すべて `Env` interface に追加し、`loadGlobalConfig` / `loadConfig` 経由でパースする。生の `env.XXX` を各所で直接読まない。
 
 ## このリポジトリで変更しやすい場所
 
@@ -173,10 +199,12 @@ npm run deploy  # Cloudflare Workers へデプロイ
 ## 注意点
 
 - **実装の中心は `src/index.ts` 1 ファイル** なので、変更時は影響範囲を広めに確認する
-- Release 通知は **Workers AI 必須**
+- Release 通知は **Workers AI 必須**（`USE_WORKERS_AI=false` だと Release 処理は失敗する）
 - Commit 通知は AI 失敗時に **フォールバックあり**
-- `.dev.vars` には秘密情報を入れる想定のため、内容を文書化・共有しない
+- `.dev.vars` には秘密情報を入れる想定のため、内容を文書化・共有・コミットしない
 - `.wrangler/` と `node_modules/` は生成物として扱う
+- README は英語版 (`README.md`) と日本語版 (`README.ja.md`) の 2 つがある。仕様を変えたら両方の整合性に注意する
+- コミット前に `npm run typecheck` を実行して型エラーがないことを確認する
 
 ## 現状の設計評価
 
